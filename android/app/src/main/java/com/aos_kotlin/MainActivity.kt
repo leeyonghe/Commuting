@@ -8,17 +8,17 @@ import com.aos_kotlin.database.AppDatabase
 import com.aos_kotlin.databinding.ActivityMainBinding
 import com.aos_kotlin.model.WorkRecord
 import com.aos_kotlin.preference.WorkPreference
-import com.aos_kotlin.repository.WorkRecordRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.time.LocalDateTime
-import java.time.temporal.ChronoUnit
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var database: AppDatabase
     private lateinit var workPreference: WorkPreference
-    private lateinit var repository: WorkRecordRepository
-    private var workRecord: WorkRecord? = null
+    private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -27,18 +27,22 @@ class MainActivity : AppCompatActivity() {
 
         database = AppDatabase.getDatabase(this)
         workPreference = WorkPreference(this)
-        repository = WorkRecordRepository(database.workRecordDao())
 
-        setupViews()
-        loadTodayWorkRecord()
+        updateCurrentTime()
+        setupClickListeners()
     }
 
-    private fun setupViews() {
-        binding.btnStart.setOnClickListener {
+    private fun updateCurrentTime() {
+        val currentTime = Date()
+        binding.tvCurrentTime.text = timeFormat.format(currentTime)
+    }
+
+    private fun setupClickListeners() {
+        binding.btnStartTime.setOnClickListener {
             recordStartTime()
         }
 
-        binding.btnEnd.setOnClickListener {
+        binding.btnEndTime.setOnClickListener {
             recordEndTime()
         }
 
@@ -51,84 +55,74 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadTodayWorkRecord() {
-        lifecycleScope.launch {
-            val today = LocalDateTime.now().truncatedTo(ChronoUnit.DAYS)
-            workRecord = repository.getWorkRecordByDate(today)
-            updateUI()
-        }
-    }
-
     private fun recordStartTime() {
-        lifecycleScope.launch {
-            val now = LocalDateTime.now()
-            val today = now.truncatedTo(ChronoUnit.DAYS)
-            
-            workRecord = WorkRecord(
-                date = today,
-                startTime = now,
-                endTime = null,
-                workDuration = 0
-            )
-            
-            workRecord = repository.createWorkRecord(workRecord!!)
-            updateUI()
-        }
-    }
+        val today = dateFormat.format(Date())
+        val currentTime = Date()
 
-    private fun recordEndTime() {
-        lifecycleScope.launch {
-            val now = LocalDateTime.now()
-            workRecord?.let { record ->
-                val updatedRecord = record.copy(
-                    endTime = now,
-                    workDuration = ChronoUnit.MINUTES.between(record.startTime, now).toInt()
-                )
-                
-                workRecord = repository.updateWorkRecord(updatedRecord)
-                updateUI()
-                
-                // Check for overtime
-                val standardMinutes = workPreference.standardWorkHours * 60 + workPreference.standardWorkMinutes
-                if (updatedRecord.workDuration > standardMinutes && workPreference.isOvertimeNotificationEnabled) {
-                    val overtimeMinutes = updatedRecord.workDuration - standardMinutes
-                    val overtimeHours = overtimeMinutes / 60
-                    val remainingMinutes = overtimeMinutes % 60
-                    Toast.makeText(
-                        this@MainActivity,
-                        "초과 근무: ${overtimeHours}시간 ${remainingMinutes}분",
-                        Toast.LENGTH_LONG
-                    ).show()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val existingRecord = database.workRecordDao().getWorkRecordByDate(dateFormat.parse(today)!!)
+            if (existingRecord != null) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "이미 출근 기록이 있습니다.", Toast.LENGTH_SHORT).show()
                 }
+                return@launch
+            }
+
+            val workRecord = WorkRecord(
+                date = dateFormat.parse(today)!!,
+                startTime = currentTime
+            )
+            database.workRecordDao().insertWorkRecord(workRecord)
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "출근 시간이 기록되었습니다.", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    private fun updateUI() {
-        workRecord?.let { record ->
-            binding.tvStartTime.text = "출근: ${formatDateTime(record.startTime)}"
-            binding.tvEndTime.text = record.endTime?.let { "퇴근: ${formatDateTime(it)}" } ?: "퇴근: -"
-            binding.tvWorkDuration.text = "근무 시간: ${formatDuration(record.workDuration)}"
-            
-            binding.btnStart.isEnabled = false
-            binding.btnEnd.isEnabled = record.endTime == null
-        } ?: run {
-            binding.tvStartTime.text = "출근: -"
-            binding.tvEndTime.text = "퇴근: -"
-            binding.tvWorkDuration.text = "근무 시간: -"
-            
-            binding.btnStart.isEnabled = true
-            binding.btnEnd.isEnabled = false
+    private fun recordEndTime() {
+        val today = dateFormat.format(Date())
+        val currentTime = Date()
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val workRecord = database.workRecordDao().getWorkRecordByDate(dateFormat.parse(today)!!)
+            if (workRecord == null) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "출근 기록이 없습니다.", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            if (workRecord.endTime != null) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "이미 퇴근 기록이 있습니다.", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            val workDuration = ((currentTime.time - workRecord.startTime.time) / (1000 * 60)).toInt()
+            val updatedRecord = workRecord.copy(
+                endTime = currentTime,
+                workDuration = workDuration
+            )
+            database.workRecordDao().updateWorkRecord(updatedRecord)
+
+            if (workPreference.isOvertimeNotificationEnabled) {
+                val standardMinutes = workPreference.standardWorkHours * 60 + workPreference.standardWorkMinutes
+                if (workDuration > standardMinutes) {
+                    val overtimeMinutes = workDuration - standardMinutes
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "초과 근무 시간: ${overtimeMinutes / 60}시간 ${overtimeMinutes % 60}분",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "퇴근 시간이 기록되었습니다.", Toast.LENGTH_SHORT).show()
+            }
         }
-    }
-
-    private fun formatDateTime(dateTime: LocalDateTime): String {
-        return dateTime.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
-    }
-
-    private fun formatDuration(minutes: Int): String {
-        val hours = minutes / 60
-        val mins = minutes % 60
-        return String.format("%d시간 %d분", hours, mins)
     }
 } 

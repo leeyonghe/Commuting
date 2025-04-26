@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AOS Kotlin</string>
+    <string name="app_name">AOS_Kotlin</string>
+    <string name="work_days_format">%d일</string>
 </resources> 
